@@ -6,15 +6,13 @@
 
 **複製 → 自動執行 zsh → 收集 stdout / stderr / exit code → 自動貼回 ChatGPT → Enter 送出**
 
-不需要瀏覽器外掛，也不需要反覆切換 Terminal。
+不需要反覆切換 Terminal。Relay 會固定把執行結果送回 ChatGPT macOS App。
 
 ## 支援
 
-- ChatGPT 網頁版
 - ChatGPT macOS App
 - macOS 13 或更新版本
 - 不需要 ChatGPT API Key
-- 不需要瀏覽器擴充功能
 
 ## 使用方式
 
@@ -60,6 +58,7 @@ Relay 每次啟動時會自動查詢 GitHub Releases。
 - stdout 與 stderr 會完整收集。
 - 回傳包含 exit code。
 - 不會自動下載或安裝更新。
+- 回傳目標固定為 ChatGPT macOS App，不再依賴前景 App 判斷。
 
 ## 從原始碼建置
 

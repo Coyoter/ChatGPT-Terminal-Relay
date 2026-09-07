@@ -2,7 +2,8 @@
 #import <ApplicationServices/ApplicationServices.h>
 
 static NSString * const kRunMarker = @"# CHATGPT_RUN";
-static NSString * const kCurrentVersion = @"0.3.0";
+static NSString * const kCurrentVersion = @"0.4.0";
+static NSString * const kChatGPTBundleID = @"com.openai.codex";
 static NSString * const kLatestReleaseAPI = @"https:" @"//api.github.com/repos/Coyoter/ChatGPT-Terminal-Relay/releases/latest";
 static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-Terminal-Relay/releases";
 
@@ -155,11 +156,6 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
     self.lastExecutedCommand = command;
     self.lastExecutedAt = now;
 
-    NSRunningApplication *sourceApp =
-        NSWorkspace.sharedWorkspace.frontmostApplication;
-
-    NSString *sourceBundleID = sourceApp.bundleIdentifier;
-
     self.executing = YES;
     [self updateStatus:@"執行中"];
 
@@ -168,8 +164,7 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             [self finishCommand:command
-                         result:result
-                 sourceBundleID:sourceBundleID];
+                         result:result];
         });
     });
 }
@@ -272,8 +267,7 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 }
 
 - (void)finishCommand:(NSString *)command
-               result:(NSDictionary *)result
-       sourceBundleID:(NSString *)sourceBundleID {
+                 result:(NSDictionary *)result {
 
     NSNumber *exitCode = result[@"exitCode"];
     NSString *output = result[@"output"];
@@ -312,17 +306,17 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
     NSArray<NSRunningApplication *> *apps =
         [NSRunningApplication
          runningApplicationsWithBundleIdentifier:
-         sourceBundleID ?: @""];
+         kChatGPTBundleID];
 
-    NSRunningApplication *sourceApp = apps.firstObject;
+    NSRunningApplication *chatGPTApp = apps.firstObject;
 
-    if (!sourceApp) {
+    if (!chatGPTApp) {
         self.executing = NO;
-        [self updateStatus:@"結果已複製"];
+        [self updateStatus:@"ChatGPT 未開啟，結果已複製"];
         return;
     }
 
-    [sourceApp activateWithOptions:
+    [chatGPTApp activateWithOptions:
         NSApplicationActivateAllWindows];
 
     dispatch_after(
