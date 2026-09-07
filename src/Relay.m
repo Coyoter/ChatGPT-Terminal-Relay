@@ -2,7 +2,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 
 static NSString * const kRunMarker = @"# CHATGPT_RUN";
-static NSString * const kCurrentVersion = @"0.4.0";
+static NSString * const kCurrentVersion = @"0.4.1";
 static NSString * const kChatGPTBundleID = @"com.openai.codex";
 static NSString * const kLatestReleaseAPI = @"https:" @"//api.github.com/repos/Coyoter/ChatGPT-Terminal-Relay/releases/latest";
 static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-Terminal-Relay/releases";
@@ -303,38 +303,216 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
         return;
     }
 
+    [self updateStatus:@"正在尋找 ChatGPT"];
+
+    [self findOrLaunchChatGPTWithAttempt:0
+                             completion:^(NSRunningApplication *chatGPTApp) {
+        if (!chatGPTApp) {
+            self.executing = NO;
+            [self updateStatus:@"ChatGPT 未開啟，結果已複製"];
+            return;
+        }
+
+        [self updateStatus:@"正在喚醒 ChatGPT"];
+
+        [chatGPTApp activateWithOptions:
+            NSApplicationActivateAllWindows];
+
+        dispatch_after(
+            dispatch_time(
+                DISPATCH_TIME_NOW,
+                (int64_t)(kActivationDelaySeconds * NSEC_PER_SEC)
+            ),
+            dispatch_get_main_queue(),
+            ^{
+                [self updateStatus:@"回傳中"];
+                [self pasteAndSend];
+
+                self.executing = NO;
+                [self updateStatus:@"監聽中"];
+            }
+        );
+    }];
+}
+
+- (NSRunningApplication *)findRunningChatGPTUsingFallback:(BOOL *)usedFallback {
+    if (usedFallback) {
+        *usedFallback = NO;
+    }
+
+    // Primary lookup.
     NSArray<NSRunningApplication *> *apps =
         [NSRunningApplication
-         runningApplicationsWithBundleIdentifier:
-         kChatGPTBundleID];
+         runningApplicationsWithBundleIdentifier:kChatGPTBundleID];
 
-    NSRunningApplication *chatGPTApp = apps.firstObject;
+    for (NSRunningApplication *app in apps) {
+        if (![app isTerminated]) {
+            return app;
+        }
+    }
 
-    if (!chatGPTApp) {
-        self.executing = NO;
-        [self updateStatus:@"ChatGPT 未開啟，結果已複製"];
+    // Fallback:
+    // runningApplicationsWithBundleIdentifier can occasionally return
+    // an empty result even while ChatGPT is alive. Check the complete
+    // NSWorkspace snapshot before concluding that ChatGPT is absent.
+    for (NSRunningApplication *candidate
+         in NSWorkspace.sharedWorkspace.runningApplications) {
+
+        if ([candidate isTerminated]) {
+            continue;
+        }
+
+        NSString *bundleID = candidate.bundleIdentifier ?: @"";
+        NSString *bundlePath = candidate.bundleURL.path ?: @"";
+        NSString *executablePath = candidate.executableURL.path ?: @"";
+
+        BOOL bundleMatches =
+            [bundleID isEqualToString:kChatGPTBundleID];
+
+        BOOL bundlePathMatches =
+            [bundlePath isEqualToString:@"/Applications/ChatGPT.app"];
+
+        BOOL executableMatches =
+            [executablePath
+             isEqualToString:
+             @"/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"];
+
+        if (bundleMatches ||
+            bundlePathMatches ||
+            executableMatches) {
+
+            if (usedFallback) {
+                *usedFallback = YES;
+            }
+
+            NSLog(
+                @"[Relay] Primary ChatGPT lookup missed PID %d; "
+                 "workspace fallback recovered it.",
+                candidate.processIdentifier
+            );
+
+            return candidate;
+        }
+    }
+
+    return nil;
+}
+
+- (void)findOrLaunchChatGPTWithAttempt:(NSInteger)attempt
+                            completion:(void (^)(NSRunningApplication *))completion {
+    BOOL usedFallback = NO;
+
+    NSRunningApplication *chatGPTApp =
+        [self findRunningChatGPTUsingFallback:&usedFallback];
+
+    if (chatGPTApp) {
+        if (usedFallback) {
+            NSLog(
+                @"[Relay] ChatGPT recovered through workspace fallback."
+            );
+        }
+
+        completion(chatGPTApp);
         return;
     }
 
-    [chatGPTApp activateWithOptions:
-        NSApplicationActivateAllWindows];
+    NSLog(
+        @"[Relay] ChatGPT not found. attempt=%ld",
+        (long)attempt
+    );
+
+    if (attempt == 0) {
+        [self updateStatus:@"正在啟動 ChatGPT"];
+
+        NSURL *appURL =
+            [NSWorkspace.sharedWorkspace
+             URLForApplicationWithBundleIdentifier:kChatGPTBundleID];
+
+        if (!appURL) {
+            NSString *fallbackPath = @"/Applications/ChatGPT.app";
+
+            if ([[NSFileManager defaultManager]
+                 fileExistsAtPath:fallbackPath]) {
+                appURL = [NSURL fileURLWithPath:fallbackPath];
+            }
+        }
+
+        if (appURL) {
+            NSWorkspaceOpenConfiguration *configuration =
+                [NSWorkspaceOpenConfiguration configuration];
+
+            configuration.activates = YES;
+            configuration.createsNewApplicationInstance = NO;
+
+            [NSWorkspace.sharedWorkspace
+             openApplicationAtURL:appURL
+             configuration:configuration
+             completionHandler:^(NSRunningApplication *application,
+                                 NSError *error) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (application && ![application isTerminated]) {
+                        NSLog(
+                            @"[Relay] ChatGPT open returned PID %d.",
+                            application.processIdentifier
+                        );
+
+                        completion(application);
+                        return;
+                    }
+
+                    if (error) {
+                        NSLog(
+                            @"[Relay] ChatGPT open failed: %@",
+                            error.localizedDescription
+                        );
+                    }
+
+                    [self scheduleChatGPTRetryFromAttempt:attempt
+                                              completion:completion];
+                });
+             }];
+
+            return;
+        }
+    }
+
+    [self scheduleChatGPTRetryFromAttempt:attempt
+                              completion:completion];
+}
+
+- (void)scheduleChatGPTRetryFromAttempt:(NSInteger)attempt
+                             completion:(void (^)(NSRunningApplication *))completion {
+    static const NSInteger kMaximumLookupAttempts = 6;
+
+    if (attempt >= kMaximumLookupAttempts) {
+        BOOL usedFallback = NO;
+
+        NSRunningApplication *finalApp =
+            [self findRunningChatGPTUsingFallback:&usedFallback];
+
+        if (finalApp) {
+            completion(finalApp);
+        } else {
+            NSLog(
+                @"[Relay] ChatGPT lookup exhausted all retries."
+            );
+            completion(nil);
+        }
+
+        return;
+    }
+
+    [self updateStatus:@"正在等待 ChatGPT"];
 
     dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW,
-                      (int64_t)(kActivationDelaySeconds * NSEC_PER_SEC)),
+        dispatch_time(
+            DISPATCH_TIME_NOW,
+            (int64_t)(0.45 * NSEC_PER_SEC)
+        ),
         dispatch_get_main_queue(),
         ^{
-            [self pasteAndSend];
-
-            dispatch_after(
-                dispatch_time(DISPATCH_TIME_NOW,
-                              (int64_t)(0.30 * NSEC_PER_SEC)),
-                dispatch_get_main_queue(),
-                ^{
-                    self.executing = NO;
-                    [self updateStatus:@"監聽中"];
-                }
-            );
+            [self findOrLaunchChatGPTWithAttempt:(attempt + 1)
+                                      completion:completion];
         }
     );
 }
@@ -535,6 +713,9 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 @end
 
 int main(int argc, const char * argv[]) {
+    (void)argc;
+    (void)argv;
+
     @autoreleasepool {
         NSApplication *app =
             NSApplication.sharedApplication;

@@ -44,6 +44,11 @@ Relay 只會執行第一行為 `# CHATGPT_RUN` 的剪貼簿內容。
 
 ## 更新
 
+Relay 0.4.1 起，如果 macOS 暫時沒有回報正在執行的 ChatGPT，
+Relay 會嘗試重新尋找並喚醒 ChatGPT，再繼續回傳結果，避免瞬時偵測失敗直接中斷。
+
+若更新 Relay 後無法自動將結果貼回 ChatGPT，請前往「系統設定 → 隱私權與安全性 → 輔助使用」，重新啟用 ChatGPT Terminal Relay。目前 macOS 版本採 ad-hoc 簽章，更新後系統可能要求重新授權。
+
 Relay 每次啟動時會自動查詢 GitHub Releases。
 
 也可以從選單列選擇「檢查更新…」。
