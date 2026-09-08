@@ -126,12 +126,12 @@ internal sealed class RelayContext : ApplicationContext
             string? failure = await Task.Run(async () => {
                 ChatGptTarget? target = await ChatGptTarget.Open(targetWindow, token);
                 return target == null ? "請開啟 ChatGPT 並選擇對話後重試" : await Delivery.Return(target, result, token);
-            }, token);
+            }, token).WaitAsync(TimeSpan.FromSeconds(10), token);
             Update(failure == null ? "已交付傳送，監聽中" : failure + "；結果已保留");
         }
         catch (OperationCanceledException) { Update("已停止回傳，結果已保留"); }
         catch (Exception error) { Update("回傳失敗，結果已保留"); tray.ShowBalloonTip(5000, "ChatGPT Terminal Relay", error.Message, ToolTipIcon.Info); }
-        finally { returnCancel?.Dispose(); returnCancel = null; busy = false; Update(monitoring ? (status.Text ?? "").Replace("狀態：", "") : "已停止，結果已保留"); }
+        finally { returnCancel?.Cancel(); returnCancel?.Dispose(); returnCancel = null; busy = false; Update(monitoring ? (status.Text ?? "").Replace("狀態：", "") : "已停止，結果已保留"); }
     }
     private async Task CheckUpdates(bool manual)
     {

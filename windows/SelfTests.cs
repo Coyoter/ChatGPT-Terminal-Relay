@@ -95,6 +95,7 @@ internal static class SelfTests
         form.Shown += async (_, _) => {
             try
             {
+                Clipboard.SetText("unrelated fixture clipboard");
                 Native.SetForegroundWindow(form.Handle);
                 nint handle = form.Handle;
                 string? failure = await Task.Run(async () => {
@@ -104,6 +105,17 @@ internal static class SelfTests
                 });
                 await Task.Delay(200);
                 Check(failure == null && sends == 1 && input.Text == "fixture result 繁體中文", "real Windows UI Automation editor and send button");
+                Check(Clipboard.GetText() == "unrelated fixture clipboard", "UI delivery never touches shared clipboard");
+                input.Text = ""; input.Name = "searchbox"; input.AccessibleName = "Search";
+                ChatGptTarget? search = await Task.Run(() => ChatGptTarget.Create(handle, Environment.ProcessId));
+                Check(search == null, "search field is not mistaken for a composer");
+                input.Name = "prompt-textarea"; input.AccessibleName = "Message";
+                ChatGptTarget? original = await Task.Run(() => ChatGptTarget.Create(handle, Environment.ProcessId));
+                using var other = new Form { Text = "Other fixture window", Width = 300, Height = 150 };
+                other.Show(); Native.SetForegroundWindow(other.Handle);
+                failure = await Task.Run(() => Delivery.Return(original!, "must not send", default));
+                Check(failure != null && input.Text.Length == 0 && sends == 1, "real foreground switch blocks writes and send");
+                other.Close();
                 exit = 0;
             }
             catch (Exception error) { Console.Error.WriteLine(error); }

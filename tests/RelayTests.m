@@ -1,7 +1,9 @@
 #import "../src/RelayDelivery.h"
+#define AXIsProcessTrusted() YES
 #define main RelayOriginalMain
 #import "../src/Relay.m"
 #undef main
+#undef AXIsProcessTrusted
 
 @interface FakeTarget : NSObject <RelayTarget>
 @property BOOL valid;
@@ -20,6 +22,13 @@
 - (BOOL)writeText:(NSString *)text { self.writes++; if (!self.writable) return NO; self.text = self.changeAfterWrite ? @"user changed draft" : text; if (self.blurAfterWrite) self.valid = NO; return YES; }
 - (BOOL)canSend { return self.ready; }
 - (BOOL)sendText:(NSString *)text { if (!self.valid || ![self.text isEqualToString:text]) return NO; self.sends++; return YES; }
+@end
+@interface PendingDelegate : RelayAppDelegate
+@property(copy) void (^lookup)(NSRunningApplication *);
+@end
+@implementation PendingDelegate
+- (void)updateStatus:(NSString *)status {}
+- (void)findOrLaunchChatGPTWithAttempt:(NSInteger)attempt completion:(void (^)(NSRunningApplication *))completion { self.lookup = completion; }
 @end
 static int passed = 0;
 static void Check(BOOL value, NSString *name) {
@@ -68,6 +77,14 @@ int main(void) {
         [d deliver:@"result" completion:^(BOOL sent, NSString *reason) {}];
         t.ready = YES; Pump(0.25);
         Check(t.sends == 1, @"wait for ready send button");
+        PendingDelegate *pending = [PendingDelegate new];
+        pending.monitoring = YES; pending.executing = YES; pending.lastResult = @"result";
+        [pending beginReturn];
+        [pending stopMonitoring:nil];
+        Check(!pending.executing, @"stop during app lookup releases pending return");
+        pending.monitoring = YES; pending.executing = YES;
+        pending.lookup(nil);
+        Check(pending.executing, @"stale lookup cannot alter newer operation after restart");
         RelayAppDelegate *app = [RelayAppDelegate new];
         NSDictionary *r = [app runShellCommand:@"printf 'out\\n'; printf 'err\\n' >&2; exit 7"];
         Check([r[@"exitCode"] intValue] == 7 && [r[@"output"] isEqual:@"out\nerr\n"], @"real zsh stdout stderr exit");
@@ -76,6 +93,8 @@ int main(void) {
         r = [app runShellCommand:@"/usr/bin/head -c 2097152 /dev/zero | /usr/bin/tr '\\000' A"];
         NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:r[@"logPath"] error:nil];
         Check([r[@"output"] length] < 66000 && [attrs[NSFileSize] unsignedLongLongValue] == 2097152, @"bounded preview and complete 2MiB log");
+        r = [app runShellCommand:@"/usr/bin/head -c 65535 /dev/zero | /usr/bin/tr '\\000' A; printf '中😀尾'"];
+        Check([r[@"output"] characterAtIndex:65535] == '\n', @"UTF8 preview boundary never corrupts valid text");
         printf("%d tests passed\n", passed);
     }
     return 0;

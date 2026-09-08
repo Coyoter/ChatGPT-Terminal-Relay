@@ -27,15 +27,24 @@ internal sealed class ChatGptTarget : IReturnTarget
     private readonly AutomationElement root;
     private readonly AutomationElement editor;
     private readonly ValuePattern value;
+    private readonly CancellationToken cancellation;
     private AutomationElement? sendButton;
 
-    private ChatGptTarget(nint window, int pid, AutomationElement root, AutomationElement editor, ValuePattern value)
+    private ChatGptTarget(nint window, int pid, AutomationElement root, AutomationElement editor, ValuePattern value, CancellationToken cancellation)
     {
         this.window = window; this.pid = pid; this.root = root;
+        this.cancellation = cancellation;
         this.editor = editor; this.value = value; title = root.Current.Name;
     }
 
     internal static nint FindWindow()
+    {
+        try { return FindWindowCore(); }
+        catch (InvalidOperationException) { return 0; }
+        catch (System.ComponentModel.Win32Exception) { return 0; }
+        catch (ArgumentException) { return 0; }
+    }
+    private static nint FindWindowCore()
     {
         using Process? front = ForegroundChatGpt();
         if (front != null) return front.MainWindowHandle;
@@ -71,11 +80,12 @@ internal sealed class ChatGptTarget : IReturnTarget
         if (!Native.SetForegroundWindow(window)) return null;
         await Task.Delay(400, cancellation);
         if (Native.GetForegroundWindow() != window) return null;
-        return Create(window, (int)id);
+        cancellation.ThrowIfCancellationRequested();
+        return Create(window, (int)id, cancellation);
     }
 
     // Also used by the isolated Windows UI fixture; production calls Open, which checks process identity.
-    internal static ChatGptTarget? Create(nint window, int pid)
+    internal static ChatGptTarget? Create(nint window, int pid, CancellationToken cancellation = default)
     {
         AutomationElement root = AutomationElement.FromHandle(window);
         var candidates = new List<(AutomationElement editor, ValuePattern value)>();
@@ -96,16 +106,17 @@ internal sealed class ChatGptTarget : IReturnTarget
         var named = candidates.Where(c => composerNames.Contains(c.editor.Current.Name)).ToList();
         var selected = identified.Count == 1 ? identified : named;
         if (selected.Count != 1) return null;
-        return new ChatGptTarget(window, pid, root, selected[0].editor, selected[0].value);
+        return new ChatGptTarget(window, pid, root, selected[0].editor, selected[0].value, cancellation);
     }
     public bool IsValid()
     {
-        if (!Native.IsWindow(window) || Native.GetForegroundWindow() != window) return false;
+        if (cancellation.IsCancellationRequested || !Native.IsWindow(window) || Native.GetForegroundWindow() != window) return false;
         Native.GetWindowThreadProcessId(window, out uint actual);
         if (actual != pid || root.Current.Name != title || !editor.Current.IsEnabled || editor.Current.IsOffscreen) return false;
         // A replaced composer/navigation must not silently retarget a different conversation.
-        for (AutomationElement? node = editor; node != null; node = TreeWalker.ControlViewWalker.GetParent(node))
-            if (Automation.Compare(node, root)) return true;
+        AutomationElement? node = editor;
+        for (int depth = 0; node != null && depth < 40; depth++, node = TreeWalker.ControlViewWalker.GetParent(node))
+            if (Automation.Compare(node, root)) return !cancellation.IsCancellationRequested;
         return false;
     }
     public string? ReadText() => value.Current.Value;

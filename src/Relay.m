@@ -23,6 +23,8 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 @property RelayDelivery *delivery;
 @property NSMenuItem *retryMenuItem;
 @property NSMenuItem *resultCopyMenuItem;
+@property NSUInteger returnGeneration;
+@property BOOL returnPending;
 @end
 
 @implementation RelayAppDelegate
@@ -146,7 +148,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     if (!command) return;
 
     // Prevent accidental double-clicks from executing the exact same command twice.
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     if (self.lastExecutedCommand &&
         [self.lastExecutedCommand isEqualToString:command] &&
         (now - self.lastExecutedAt) < 3.0) {
@@ -309,21 +311,26 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 }
 
 - (void)endReturn:(NSString *)status {
+    self.returnPending = NO;
     self.executing = NO;
     self.delivery = nil;
     [self updateStatus:self.monitoring ? status : @"已停止，結果已保留"];
 }
 
 - (void)beginReturn {
+    NSUInteger generation = ++self.returnGeneration;
+    self.returnPending = YES;
     if (!self.monitoring) { [self endReturn:@"已停止，結果已保留"]; return; }
     if (!AXIsProcessTrusted()) { [self endReturn:@"需要輔助使用權限，結果已保留"]; return; }
     [self updateStatus:@"正在尋找 ChatGPT"];
     [self findOrLaunchChatGPTWithAttempt:0 completion:^(NSRunningApplication *app) {
+        if (generation != self.returnGeneration) return;
         if (!self.monitoring || !app) { [self endReturn:@"找不到 ChatGPT，結果已保留"]; return; }
         if (![app activateWithOptions:NSApplicationActivateAllWindows]) {
             [self endReturn:@"無法喚醒 ChatGPT，請開啟後重試"]; return;
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (generation != self.returnGeneration) return;
             if (!self.monitoring) { [self endReturn:@"已停止"]; return; }
             id<RelayTarget> target = [[RelayAXTarget alloc] initWithPID:app.processIdentifier];
             self.delivery = [[RelayDelivery alloc] initWithTarget:target];
@@ -400,6 +407,8 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 
 - (void)findOrLaunchChatGPTWithAttempt:(NSInteger)attempt
                             completion:(void (^)(NSRunningApplication *))completion {
+    if (!self.returnPending) return;
+    NSUInteger lookupGeneration = self.returnGeneration;
     BOOL usedFallback = NO;
 
     NSRunningApplication *chatGPTApp =
@@ -450,6 +459,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
              completionHandler:^(NSRunningApplication *application,
                                  NSError *error) {
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (lookupGeneration != self.returnGeneration || !self.returnPending) return;
                     if (application && ![application isTerminated]) {
                         NSLog(
                             @"[Relay] ChatGPT open returned PID %d.",
@@ -482,6 +492,8 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 
 - (void)scheduleChatGPTRetryFromAttempt:(NSInteger)attempt
                              completion:(void (^)(NSRunningApplication *))completion {
+    if (!self.returnPending) return;
+    NSUInteger lookupGeneration = self.returnGeneration;
     static const NSInteger kMaximumLookupAttempts = 6;
 
     if (attempt >= kMaximumLookupAttempts) {
@@ -511,6 +523,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
         ),
         dispatch_get_main_queue(),
         ^{
+            if (lookupGeneration != self.returnGeneration || !self.returnPending) return;
             [self findOrLaunchChatGPTWithAttempt:(attempt + 1)
                                       completion:completion];
         }
@@ -670,7 +683,9 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 
 - (void)stopMonitoring:(id)sender {
     self.monitoring = NO;
+    self.returnGeneration++;
     [self.delivery cancel];
+    if (self.returnPending) [self endReturn:@"已停止，結果已保留"];
     [self updateStatus:@"已停止"];
 }
 
