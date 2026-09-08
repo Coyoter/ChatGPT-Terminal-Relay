@@ -1,129 +1,114 @@
 # ChatGPT Terminal Relay
 
-把 ChatGPT 給你的指令交給電腦執行，再將結果送回 ChatGPT。你只需要複製一次指令，不必反覆切換終端機。
+當 Codex 額度用完、專案還沒做完時，讓 ChatGPT 的 **Chat 模式**接手本機工作。
 
-**複製指令 → 自動執行 → 收集輸出與錯誤碼 → 填入 ChatGPT → 傳送**
+把原任務、專案路徑與目前進度交給 ChatGPT，Relay 負責接續：
 
-支援 macOS 與 Windows，不需要 ChatGPT API Key。
+**取得指令 → 本機執行 → 收集輸出、錯誤與結束碼 → 回傳 ChatGPT → 等待下一步。**
 
-> **macOS 使用建議：目前請使用 [0.4.1](https://github.com/Coyoter/ChatGPT-Terminal-Relay/releases/tag/v0.4.1)。0.5.0 的回傳改動造成實際使用失敗，0.5.1／0.5.2 診斷版也尚未恢復正常回傳；自動化測試通過不代表已完成真實 ChatGPT 驗證。以下 0.5.x 內容為開發紀錄。**
+Relay 是獨立的本機程式，不使用 Codex 的工具服務，也不需要 OpenAI API Key。ChatGPT Chat 模式本身仍需要可用的帳號與用量。
 
-## macOS 0.5.2 輸入框辨識修正與診斷
+## macOS 0.6.0
 
-根據實際診斷紀錄，修正「ChatGPT 只有一個可寫入的輸入框，但名稱不在預設清單就被排除」的問題。優先比對已知名稱／識別碼；無法比對時，僅在符合條件的輸入框只有一個時採用它，有多個時仍停止回傳。另保留 0.5.1 新增的權限與回傳診斷。
+### 只按複製
 
-- 自動記錄啟動版本及位置、目前輔助使用權限、指令是否收到與執行完成、ChatGPT 尋找結果、輸入框辨識數量、回傳中止原因及輔助使用 API 錯誤碼。
-- 選單新增「檢查輔助使用權限…」及「開啟診斷紀錄」。沒有權限時，選單列顯示 `⇄ 權限`。
-- 診斷檔位於 `~/Library/Application Support/ChatGPT Terminal Relay/diagnostics.jsonl`，超過 1 MiB 時保留一份前次紀錄。診斷檔不記錄指令、剪貼簿文字、輸出內容、草稿或對話標題；原本的完整指令輸出檔仍保留於 `Logs/`。
-- 更新採用 ad-hoc 簽章的 App 後，設定中既有的開關可能仍對應舊版。若 Relay 回報沒有權限，請移除舊項目，重新加入**目前正在執行的 App 路徑**，再開啟權限。
+啟動後預設使用這個模式。ChatGPT 給出指令時，你只需按程式碼區塊的「複製」，Relay 就會執行並回傳。
 
-Windows 維持 0.5.0，本次新增的診斷功能限 macOS。
+### 全自動接續
 
-## 0.5.0 的改變
+1. 開啟要接手工作的 ChatGPT Chat 對話。
+2. 在 Relay 選單選「選擇專案並複製接手提示…」，選擇專案資料夾。
+3. 把提示貼到 ChatGPT，補上原任務與 Codex 最後的進度摘要。
+4. 在 Relay 選單選「啟動全自動接續」，再送出任務。
+5. 保持這個 ChatGPT 視窗在前景。Relay 會等待回答完成、自動複製下一段指令、執行，再將結果送回。
 
-- 回傳直接指定 ChatGPT 的輸入框及傳送按鈕，移除全域 Cmd+V／Enter。
-- 回傳不再讀寫剪貼簿，等待期間複製其他文字不會把它當成結果傳送。
-- 保護既有草稿；視窗、內容或輸入框狀態變更時停止回傳並保留結果。
-- 新增「重試回傳上次結果」與「複製上次結果」。失敗後不會重新執行原指令。
-- 大量輸出只回傳前段摘要，完整輸出保留在本機紀錄檔，避免一次塞滿 ChatGPT。
-- macOS 執行檔的最低部署版本修正為 13.0。
-- 新增 Windows x64 與 ARM64 可攜版，使用 PowerShell 執行指令。
+如果已經拿到第一段指令，也可以先啟動全自動模式，再手動複製第一段；後續回答由 Relay 接續。
 
-**目前 0.5.0 是測試版。** 已包含自動化回歸測試；Windows 的實際 ChatGPT App 相容性仍需在使用者電腦驗證。若 ChatGPT 沒有提供可寫入的輔助使用／UI Automation 輸入框，Relay 會保留結果，讓你手動複製，不會改用全域鍵盤事件。不同版本或介面語言的 ChatGPT 可能需要調整控制項辨識。目前傳送按鈕辨識包含繁體中文、簡體中文及英文。
+全自動模式以 ChatGPT 的輔助使用介面判斷生成、待命與複製控制項，並等待連續穩定的狀態；不會在觀察到生成中時執行。收到沒有單一可執行區塊的回答、`RELAY_DONE:` 或 `RELAY_PAUSE:` 時停止。切換對話、失去權限或回傳失敗時，也會停止或等待恢復。
 
-## 安裝
+這個模式不會在啟動 App 時自行開啟，不會重播啟用前的舊回答。可隨時從選單停止全自動接續；正在執行的 Shell 不會因此取消。
 
-從 [GitHub Releases](https://github.com/Coyoter/ChatGPT-Terminal-Relay/releases) 下載對應 ZIP。
+**0.6.0 為測試版。** macOS 的只按複製流程已在使用者電腦完成實際回傳。全自動接續已加入，但仍須確認目前 ChatGPT App 版本的控制項相容性；介面變動可能使它停止等待。未辨識成功時可使用只按複製模式，診斷紀錄會保留停止原因。
+
+## 安裝與權限
+
+從 [GitHub Releases](https://github.com/Coyoter/ChatGPT-Terminal-Relay/releases) 下載。
 
 ### macOS
 
-1. 下載 `ChatGPT-Terminal-Relay-v0.5.2-macOS.zip`。
-2. 解壓縮，把 `ChatGPT Terminal Relay.app` 放到 Applications。
-3. 啟動 App，至「系統設定 → 隱私權與安全性 → 輔助使用」允許 Relay。
-4. 開啟 ChatGPT macOS App，切到要使用的對話。選單列出現 `⇄ Relay` 即可使用。
+下載對應 macOS ZIP，先結束舊 Relay，再將 App 替換到相同安裝位置。macOS 包為 Apple Silicon，最低部署版本 13.0；ChatGPT App 本身的系統需求另計。
 
-Relay 的最低系統版本為 macOS 13，套件為 Apple Silicon；ChatGPT App 本身的系統需求另計。採 ad-hoc 簽章，未經 Apple Developer ID 公證。更新後 macOS 可能要求重新啟用輔助使用權限。舊版可正常使用時，建議先保留舊 App 作為回復備份。
+新版會辨識**版本、執行檔內容與安裝路徑**。第一次執行或偵測到更新時，先以系統 `tccutil` 清除 **ChatGPT Terminal Relay 自己**的舊輔助使用授權，再要求使用者重新授權。相同版本與內容的一般重新啟動不會反覆清除。它不會替使用者授予權限，也不會重設其他 App 的權限。
+
+請依系統提示重新開啟 Relay 權限。macOS 27 的頁面名稱可能是「裝置控制和資料取用」。Relay 每兩秒確認程式實際取得的權限；沒有權限時顯示 `⇄ 權限`。可用選單的「檢查輔助使用權限…」查看目前版本與安裝位置。
+
+目前採 ad-hoc 簽章，未經 Apple Developer ID 公證。
 
 ### Windows
 
-1. 一般 Intel／AMD 電腦下載 `Windows-x64.zip`；Windows ARM 電腦可下載 `Windows-arm64.zip`。
-2. 解壓縮至你要保留的資料夾，執行 `ChatGPTTerminalRelay.exe`。
-3. 開啟已安裝的 ChatGPT Windows App，選擇對話。Relay 會出現在右下角系統匣，可能收在「隱藏的圖示」裡。
-4. 首次使用前，把下面「給 ChatGPT 的專案提示」中的 Windows 提示貼到對話，讓它產生 PowerShell 指令。
+目前提供的是 [0.5.0 Windows 預覽版](https://github.com/Coyoter/ChatGPT-Terminal-Relay/releases/tag/v0.5.0)，包含 x64 與 ARM64。此版使用 PowerShell，尚未包含 macOS 0.6.0 的全自動接續功能，真實 ChatGPT 對接仍待 Windows 實機驗證。
 
-Windows 版包含 .NET 執行環境，不必自行安裝 .NET、Python、WSL 或額外終端機。使用一般權限執行；ChatGPT 也應以一般權限執行。套件尚未經 Windows 程式碼簽章，系統可能顯示不明發行者提示。適用 Windows 10／11；ChatGPT App 本身的系統需求另計。
+解壓縮後執行 `ChatGPTTerminalRelay.exe`。執行環境已包含在包內，不需要另裝 .NET。優先使用 PowerShell 7，未安裝時使用 Windows PowerShell 5.1。兩種 Shell 的執行測試均已通過。Windows 包尚未程式碼簽章。
 
-優先使用 `Program Files/PowerShell/7/pwsh.exe`，未安裝時使用 Windows 內建 Windows PowerShell 5.1。Shell 在背景執行，不會每次跳出終端機視窗。CMD、Git Bash 與 WSL 不會自動互相切換，請讓 ChatGPT 產生 PowerShell 指令。
+## 指令協議
 
-## 指令格式
-
-只有**第一行完全等於** `# CHATGPT_RUN` 的內容會執行，支援 LF 與 Windows CRLF 換行。一般複製文字不會執行。相同指令在 3 秒內重複複製只執行一次。
-
-macOS 範例：
+可執行內容第一行必須完全等於 `# CHATGPT_RUN`，例如：
 
 ```zsh
 # CHATGPT_RUN
-printf 'Hello from macOS\n'
-sw_vers
+printf '%s\n' 'RELAY_CONNECTED'
 ```
 
-Windows 範例：
+macOS 透過 `/bin/zsh -lc` 執行。每次都是新的 Shell，涉及專案的每段指令都必須自行 `cd` 到絕對路徑。相同指令在 3 秒內重複複製只執行一次；同一時間只處理一段指令。
 
-```powershell
-# CHATGPT_RUN
-Write-Output 'Hello from Windows'
-$PSVersionTable.PSVersion
-```
+全自動模式可以從完整回答中取出唯一、完整的 Markdown 程式碼區塊；沒有標記、圍欄未結束或包含多個區塊時，不會自動執行。
 
-每次執行都是新的 Shell；上一個指令的 `cd` 與變數不會保留。要處理某個專案時，請讓每段指令自行切換到專案資料夾。Windows 預設工作資料夾是使用者家目錄；macOS 請在指令中明確指定路徑。
-
-同一時間處理一個指令。請等上一次完成再複製下一個；Relay 不提供指令佇列。標記代表允許執行，並不是沙盒，請只複製你打算執行的指令。
-
-## 回傳與恢復
+回傳格式：
 
 ```text
 EXIT_CODE: 0
 
 OUTPUT:
-Hello from Windows
+RELAY_CONNECTED
 ```
 
-回傳時會喚醒 ChatGPT、尋找可編輯輸入框、確認內容，再操作該視窗的傳送按鈕。不會覆寫既有草稿，也不會向其他軟體送出鍵盤事件。若切換視窗、輸入內容被更動、ChatGPT 尚未就緒或權限不足，結果會保留。
+標記只是啟動條件，不驗證來源，也不是沙盒。指令以目前帳號的權限執行。請在接手提示中明確描述任務與限制，避免讓指令輸出密碼、API Key、權杖或其他不適合交給 ChatGPT 的資料。
 
-- **重試回傳上次結果**：先開啟 ChatGPT，選擇對話並清空自己的草稿，再使用此選項。若輸入框已經是相同結果，不會重複插入文字。
-- **複製上次結果**：由你手動貼回；只有這個明確操作會將結果寫入剪貼簿。
-- **停止監聽**：不再接收新指令，並中止等待中的自動回傳；不會撤回已傳送的訊息，也不會終止已在執行的 Shell。
-- **取消執行中的指令**：Windows 版可從系統匣終止 PowerShell 與它的子程序。
+## 回傳方式
 
-「已交付傳送」表示已呼叫 ChatGPT 的傳送按鈕，不代表伺服器已成功接收。網路或 ChatGPT 出現問題時，請先查看對話，再決定是否重試，避免重複傳送。
+macOS 恢復以貼上及送出按鍵完成回傳，不再強制要求輸入框名稱符合清單，或以草稿讀回來阻擋操作。按鍵指定送到 ChatGPT 程序；送出前會再確認 ChatGPT 仍在前景、輔助使用權限有效，以及剪貼簿仍然是本次結果。
+
+回傳時請不要操作 ChatGPT 的其他輸入位置。按鍵已送出不代表伺服器已接收；若網路或 ChatGPT 異常，先查看對話，再決定是否使用「重試回傳上次結果」，避免重複傳送。也可選「複製上次結果」手動處理。重試不會重新執行原指令。
+
+## 接手提示
+
+- App 內「選擇專案並複製接手提示…」會把專案絕對路徑填入提示；不會自行讀取專案檔案。
+- [完整 macOS 接手提示](HANDOFF_PROMPT.txt)
+- [macOS／Windows 基本操作提示](PROJECT_PROMPT.md)
+
+Codex 停下前若能留下原目標、已完成項目、剩餘工作、驗證結果與不可改動的限制，ChatGPT 就不必從零猜測。提示會要求它先確認專案實況及 AGENTS.md，保留既有未提交修改，再從未完成處接手。
 
 ## 本機紀錄
 
-回傳只保留約前 64 KiB／64K 字元的預覽；較長的完整輸出另存紀錄檔，路徑會列在結果中。
+macOS：`~/Library/Application Support/ChatGPT Terminal Relay/`
 
-- macOS：`~/Library/Application Support/ChatGPT Terminal Relay/`
-- Windows：`%LOCALAPPDATA%/ChatGPTTerminalRelay/`
+- `diagnostics.jsonl`：啟動位置、實際權限、指令階段、自動接續狀態與錯誤碼。不記錄指令、剪貼簿文字、草稿或對話標題。超過 1 MiB 會保留一份前次紀錄。
+- `authorization-build.json`：記住已處理過授權重設的程式指紋。
+- `last-result.txt`：上次結果。
+- `Logs/`：完整指令輸出。長輸出只回傳前段預覽，完整檔案路徑會附在結果中。
 
-`last-result.txt` 保留上次結果，`Logs/` 保留完整輸出。紀錄可能包含你的指令輸出，請按需求自行清理。Relay 不會自行上傳這些檔案。正常回傳會把結果預覽交給 ChatGPT；檢查更新會連線 GitHub。
+Windows 的結果與輸出位於 `%LOCALAPPDATA%/ChatGPTTerminalRelay/`。輸出檔可能包含專案資料，請按需要自行清理。
 
-## 給 ChatGPT 的專案提示
+## 開發與驗證
 
-見 [PROJECT_PROMPT.md](PROJECT_PROMPT.md)，分別提供 macOS 與 Windows 可直接貼上的完整提示。
-
-## 更新
-
-每次啟動時檢查 GitHub 的最新正式 Release，也可手動選擇「檢查更新…」。只提供通知或開啟下載頁，不會自行下載或安裝。測試版需自行前往 Releases 下載。
-
-## 從原始碼建置
-
-macOS 需 Apple Command Line Tools：
+macOS：
 
 ```sh
 ./tests/run-macos.sh
 ./build.sh
 ```
 
-Windows 需 .NET 10 SDK：
+Windows：
 
 ```powershell
 dotnet build windows/ChatGPTTerminalRelay.csproj -c Release
@@ -132,7 +117,11 @@ dotnet windows/bin/Release/net10.0-windows/ChatGPTTerminalRelay.dll --self-test
 ./build-windows.ps1 -Runtime win-arm64
 ```
 
-產物位於 `dist/`。GitHub Actions 會在 macOS 與 Windows 執行測試、打包；Windows 另測試打包後的 x64 EXE。`--ui-fixture` 是獨立測試視窗，驗證 UI Automation 填字及按鈕呼叫，不會控制真實 ChatGPT。
+GitHub Actions 包含 Shell、回傳、權限重設與自動接續狀態的測試。模擬測試通過不等於已驗證真實 ChatGPT 介面，發行紀錄會分別列出。
+
+## 已知歷史問題
+
+macOS 0.5.0–0.5.2 的直接輸入框方案在使用者實際環境失敗，並已標記為不建議使用。0.5.3 恢復貼上回傳及更新後授權重設，使用者已回傳 `RELAY_CONNECTED` 並確認可執行。0.6.0 在此流程上加入全自動接續。
 
 ## License
 
