@@ -37,6 +37,23 @@ jobs:
         run: dotnet build windows/ChatGPTTerminalRelay.csproj -c Release --nologo -warnaserror
       - name: PowerShell and delivery regression tests
         run: dotnet windows/bin/Release/net10.0-windows/ChatGPTTerminalRelay.dll --self-test
+      - name: Built-in Windows PowerShell 5.1 regression tests
+        shell: pwsh
+        run: |
+          # Force only the shell-selection seam in an isolated copy. Production files/packages stay unchanged.
+          $testRoot = Join-Path $env:RUNNER_TEMP 'relay-powershell51'
+          New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+          Get-ChildItem windows -File | Copy-Item -Destination $testRoot
+          $core = Join-Path $testRoot 'RelayCore.cs'
+          $source = Get-Content $core -Raw
+          $needle = 'if (File.Exists(core)) return core;'
+          if (-not $source.Contains($needle)) { throw 'Shell-selection test seam changed.' }
+          $source.Replace($needle, '// Test forces the built-in PowerShell fallback below.') | Set-Content $core -Encoding utf8
+          & "$env:WINDIR/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -Command '$PSVersionTable.PSVersion'
+          dotnet build "$testRoot/ChatGPTTerminalRelay.csproj" -c Release --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'PowerShell 5.1 test build failed.' }
+          dotnet "$testRoot/bin/Release/net10.0-windows/ChatGPTTerminalRelay.dll" --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'PowerShell 5.1 regression tests failed.' }
       - name: Isolated UI Automation fixture
         id: fixture
         continue-on-error: true
