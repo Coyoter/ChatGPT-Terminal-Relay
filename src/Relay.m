@@ -1,8 +1,9 @@
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import "RelayDelivery.h"
+#import "RelayDiagnostics.h"
 
-static NSString * const kCurrentVersion = @"0.5.0";
+static NSString * const kCurrentVersion = @"0.5.2";
 static NSString * const kChatGPTBundleID = @"com.openai.codex";
 static NSString * const kLatestReleaseAPI = @"https:" @"//api.github.com/repos/Coyoter/ChatGPT-Terminal-Relay/releases/latest";
 static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-Terminal-Relay/releases";
@@ -25,6 +26,9 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 @property NSMenuItem *resultCopyMenuItem;
 @property NSUInteger returnGeneration;
 @property BOOL returnPending;
+@property NSString *commandID;
+@property BOOL lastAccessibilityTrusted;
+@property NSTimeInterval lastPermissionCheck;
 @end
 
 @implementation RelayAppDelegate
@@ -32,6 +36,10 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     self.monitoring = YES;
     self.executing = NO;
+    self.lastAccessibilityTrusted = AXIsProcessTrusted();
+    RelayLog(@"app_started", @{@"version":kCurrentVersion, @"bundle_path":NSBundle.mainBundle.bundlePath,
+        @"accessibility_trusted":@(self.lastAccessibilityTrusted),
+        @"os":NSProcessInfo.processInfo.operatingSystemVersionString});
     self.lastChangeCount = NSPasteboard.generalPasteboard.changeCount;
 
     NSString *saved = [NSString stringWithContentsOfFile:RelaySavedResultPath()
@@ -40,7 +48,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     [self setupStatusItem];
     [self requestAccessibilityPermission];
     [self startClipboardTimer];
-    [self updateStatus:@"監聽中"];
+    [self updateStatus:self.lastAccessibilityTrusted ? @"監聽中" : @"需要輔助使用權限"];
 
     // Check GitHub Releases once after each launch without interrupting startup.
     dispatch_after(
@@ -98,6 +106,14 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     [menu addItem:self.resultCopyMenuItem];
     [menu addItem:NSMenuItem.separatorItem];
 
+    NSMenuItem *permissionItem = [[NSMenuItem alloc] initWithTitle:@"檢查輔助使用權限…" action:@selector(checkAccessibility:) keyEquivalent:@""];
+    permissionItem.target = self;
+    [menu addItem:permissionItem];
+    NSMenuItem *diagnosticsItem = [[NSMenuItem alloc] initWithTitle:@"開啟診斷紀錄" action:@selector(openDiagnostics:) keyEquivalent:@""];
+    diagnosticsItem.target = self;
+    [menu addItem:diagnosticsItem];
+    [menu addItem:NSMenuItem.separatorItem];
+
     NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"結束 Relay"
                                                      action:@selector(quit:)
                                               keyEquivalent:@"q"];
@@ -111,7 +127,26 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     NSDictionary *options = @{
         (__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES
     };
-    AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+    self.lastAccessibilityTrusted = AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+    RelayLog(@"permission_checked", @{@"trusted":@(self.lastAccessibilityTrusted), @"prompt_requested":@YES});
+}
+
+- (void)openDiagnostics:(id)sender {
+    RelayLog(@"diagnostics_opened", @{});
+    [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:RelayDiagnosticsPath()]]];
+}
+
+- (void)checkAccessibility:(id)sender {
+    [self requestAccessibilityPermission];
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = self.lastAccessibilityTrusted ? @"輔助使用權限正常" : @"目前這份 Relay 尚未取得權限";
+    alert.informativeText = self.lastAccessibilityTrusted
+        ? @"系統已允許目前正在執行的 Relay 控制其他 App。若回傳仍失敗，可開啟診斷紀錄查看原因。"
+        : [NSString stringWithFormat:@"目前版本：%@\n位置：%@\n\n若設定中已經開啟，請移除舊的 ChatGPT Terminal Relay 項目，再加入這個位置的 App 並開啟權限。單純關閉再開啟舊項目可能無效。", kCurrentVersion, NSBundle.mainBundle.bundlePath];
+    [alert addButtonWithTitle:self.lastAccessibilityTrusted ? @"好" : @"開啟輔助使用設定"];
+    if (!self.lastAccessibilityTrusted) [alert addButtonWithTitle:@"稍後"];
+    if ([alert runModal] == NSAlertFirstButtonReturn && !self.lastAccessibilityTrusted)
+        [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]];
 }
 
 - (void)startClipboardTimer {
@@ -129,6 +164,16 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 }
 
 - (void)checkClipboard:(NSTimer *)timer {
+    NSTimeInterval uptime = NSProcessInfo.processInfo.systemUptime;
+    if (uptime - self.lastPermissionCheck >= 2.0) {
+        self.lastPermissionCheck = uptime;
+        BOOL trusted = AXIsProcessTrusted();
+        if (trusted != self.lastAccessibilityTrusted) {
+            self.lastAccessibilityTrusted = trusted;
+            RelayLog(@"permission_changed", @{@"trusted":@(trusted)});
+            if (!self.executing) [self updateStatus:self.monitoring ? (trusted ? @"監聽中" : @"需要輔助使用權限") : @"已停止"];
+        }
+    }
     if (!self.monitoring || self.executing) {
         return;
     }
@@ -145,13 +190,17 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     NSString *text = [pasteboard stringForType:NSPasteboardTypeString];
 
     NSString *command = RelayParseCommand(text);
-    if (!command) return;
+    if (!command) {
+        RelayLog(@"clipboard_ignored", @{@"has_text":@(text != nil), @"characters":@(text.length), @"reason":@"missing_or_invalid_marker"});
+        return;
+    }
 
     // Prevent accidental double-clicks from executing the exact same command twice.
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     if (self.lastExecutedCommand &&
         [self.lastExecutedCommand isEqualToString:command] &&
         (now - self.lastExecutedAt) < 3.0) {
+        RelayLog(@"command_duplicate_ignored", @{});
         return;
     }
 
@@ -159,6 +208,8 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     self.lastExecutedAt = now;
 
     self.executing = YES;
+    self.commandID = NSUUID.UUID.UUIDString;
+    RelayLog(@"command_accepted", @{@"command_id":self.commandID, @"characters":@(command.length), @"accessibility_trusted":@(AXIsProcessTrusted())});
     [self updateStatus:@"執行中"];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -277,6 +328,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 
     NSNumber *exitCode = result[@"exitCode"];
     NSString *output = result[@"output"];
+    RelayLog(@"command_finished", @{@"command_id":self.commandID ?: @"", @"exit_code":exitCode ?: @127, @"output_characters":@(output.length)});
 
     if (output.length == 0) {
         output = @"(no output)";
@@ -305,12 +357,14 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 }
 
 - (void)retryReturn:(id)sender {
+    RelayLog(@"return_retry_requested", @{@"busy":@(self.executing), @"monitoring":@(self.monitoring)});
     if (self.executing || !self.lastResult || !self.monitoring) return;
     self.executing = YES;
     [self beginReturn];
 }
 
 - (void)endReturn:(NSString *)status {
+    RelayLog(@"return_finished", @{@"command_id":self.commandID ?: @"", @"status":status});
     self.returnPending = NO;
     self.executing = NO;
     self.delivery = nil;
@@ -321,12 +375,17 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     NSUInteger generation = ++self.returnGeneration;
     self.returnPending = YES;
     if (!self.monitoring) { [self endReturn:@"已停止，結果已保留"]; return; }
-    if (!AXIsProcessTrusted()) { [self endReturn:@"需要輔助使用權限，結果已保留"]; return; }
+    BOOL trusted = AXIsProcessTrusted();
+    self.lastAccessibilityTrusted = trusted;
+    RelayLog(@"return_permission_check", @{@"trusted":@(trusted), @"command_id":self.commandID ?: @""});
+    if (!trusted) { [self endReturn:@"需要輔助使用權限，結果已保留"]; return; }
     [self updateStatus:@"正在尋找 ChatGPT"];
     [self findOrLaunchChatGPTWithAttempt:0 completion:^(NSRunningApplication *app) {
         if (generation != self.returnGeneration) return;
         if (!self.monitoring || !app) { [self endReturn:@"找不到 ChatGPT，結果已保留"]; return; }
-        if (![app activateWithOptions:NSApplicationActivateAllWindows]) {
+        BOOL activated = [app activateWithOptions:NSApplicationActivateAllWindows];
+        RelayLog(@"chatgpt_activation", @{@"target_pid":@(app.processIdentifier), @"request_accepted":@(activated), @"frontmost_pid":@(NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier)});
+        if (!activated) {
             [self endReturn:@"無法喚醒 ChatGPT，請開啟後重試"]; return;
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -414,6 +473,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     NSRunningApplication *chatGPTApp =
         [self findRunningChatGPTUsingFallback:&usedFallback];
 
+    RelayLog(@"chatgpt_lookup", @{@"attempt":@(attempt), @"found":@(chatGPTApp != nil), @"fallback":@(usedFallback), @"target_pid":@(chatGPTApp.processIdentifier)});
     if (chatGPTApp) {
         if (usedFallback) {
             NSLog(
@@ -660,11 +720,13 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 }
 
 - (void)updateStatus:(NSString *)status {
+    RelayLog(@"status", @{@"text":status, @"monitoring":@(self.monitoring), @"executing":@(self.executing)});
+    self.statusItem.button.toolTip = [NSString stringWithFormat:@"Relay %@ — %@", kCurrentVersion, status];
     self.statusMenuItem.title =
         [NSString stringWithFormat:@"狀態：%@", status];
 
     self.statusItem.button.title =
-        self.executing ? @"⇄ …" : @"⇄ Relay";
+        self.executing ? @"⇄ …" : (self.lastAccessibilityTrusted ? @"⇄ Relay" : @"⇄ 權限");
 
     self.startMenuItem.enabled = !self.monitoring;
     self.stopMenuItem.enabled = self.monitoring;
@@ -690,6 +752,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
 }
 
 - (void)quit:(id)sender {
+    RelayLog(@"app_quit", @{@"executing":@(self.executing)});
     [NSApp terminate:nil];
 }
 

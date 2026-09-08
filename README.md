@@ -6,6 +6,17 @@
 
 支援 macOS 與 Windows，不需要 ChatGPT API Key。
 
+## macOS 0.5.2 輸入框辨識修正與診斷
+
+根據實際診斷紀錄，修正「ChatGPT 只有一個可寫入的輸入框，但名稱不在預設清單就被排除」的問題。優先比對已知名稱／識別碼；無法比對時，僅在符合條件的輸入框只有一個時採用它，有多個時仍停止回傳。另保留 0.5.1 新增的權限與回傳診斷。
+
+- 自動記錄啟動版本及位置、目前輔助使用權限、指令是否收到與執行完成、ChatGPT 尋找結果、輸入框辨識數量、回傳中止原因及輔助使用 API 錯誤碼。
+- 選單新增「檢查輔助使用權限…」及「開啟診斷紀錄」。沒有權限時，選單列顯示 `⇄ 權限`。
+- 診斷檔位於 `~/Library/Application Support/ChatGPT Terminal Relay/diagnostics.jsonl`，超過 1 MiB 時保留一份前次紀錄。診斷檔不記錄指令、剪貼簿文字、輸出內容、草稿或對話標題；原本的完整指令輸出檔仍保留於 `Logs/`。
+- 更新採用 ad-hoc 簽章的 App 後，設定中既有的開關可能仍對應舊版。若 Relay 回報沒有權限，請移除舊項目，重新加入**目前正在執行的 App 路徑**，再開啟權限。
+
+Windows 維持 0.5.0，本次新增的診斷功能限 macOS。
+
 ## 0.5.0 的改變
 
 - 回傳直接指定 ChatGPT 的輸入框及傳送按鈕，移除全域 Cmd+V／Enter。
@@ -24,7 +35,7 @@
 
 ### macOS
 
-1. 下載 `ChatGPT-Terminal-Relay-v0.5.0-macOS.zip`。
+1. 下載 `ChatGPT-Terminal-Relay-v0.5.2-macOS.zip`。
 2. 解壓縮，把 `ChatGPT Terminal Relay.app` 放到 Applications。
 3. 啟動 App，至「系統設定 → 隱私權與安全性 → 輔助使用」允許 Relay。
 4. 開啟 ChatGPT macOS App，切到要使用的對話。選單列出現 `⇄ Relay` 即可使用。

@@ -95,6 +95,20 @@ int main(void) {
         Check([r[@"output"] length] < 66000 && [attrs[NSFileSize] unsignedLongLongValue] == 2097152, @"bounded preview and complete 2MiB log");
         r = [app runShellCommand:@"/usr/bin/head -c 65535 /dev/zero | /usr/bin/tr '\\000' A; printf '中😀尾'"];
         Check([r[@"output"] characterAtIndex:65535] == '\n', @"UTF8 preview boundary never corrupts valid text");
+        RelayLog(@"diagnostic_test", @{@"trusted":@NO, @"note":@"換行\n測試"});
+        NSString *diagnostics = [NSString stringWithContentsOfFile:RelayDiagnosticsPath() encoding:NSUTF8StringEncoding error:nil];
+        BOOL validJSON = YES;
+        for (NSString *line in [diagnostics componentsSeparatedByString:@"\n"]) {
+            if (!line.length) continue;
+            NSDictionary *entry = [NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+            if (!entry[@"event"] || !entry[@"timestamp"] || !entry[@"pid"]) validJSON = NO;
+        }
+        Check(validJSON && [diagnostics containsString:@"diagnostic_test"], @"diagnostics are valid JSON lines with metadata");
+        Check(![diagnostics containsString:@"existing draft"] && ![diagnostics containsString:@"user changed draft"], @"diagnostics omit editor contents");
+        [[NSMutableData dataWithLength:1048576] writeToFile:RelayDiagnosticsPath() atomically:YES];
+        RelayLog(@"rotation_test", @{});
+        Check([[NSFileManager defaultManager] fileExistsAtPath:[RelayDiagnosticsPath() stringByAppendingString:@".previous"]] &&
+              [[[NSFileManager defaultManager] attributesOfItemAtPath:RelayDiagnosticsPath() error:nil][NSFileSize] unsignedLongLongValue] < 2048, @"diagnostics rotate at 1MiB");
         printf("%d tests passed\n", passed);
     }
     return 0;

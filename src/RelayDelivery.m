@@ -1,4 +1,5 @@
 #import "RelayDelivery.h"
+#import "RelayDiagnostics.h"
 
 NSString *RelayParseCommand(NSString *text) {
     if (!text) return nil;
@@ -47,6 +48,7 @@ static NSString *Normalize(NSString *text) {
 - (void)finish:(BOOL)sent reason:(NSString *)reason {
     if (self.finished) return;
     self.finished = YES;
+    RelayLog(@"delivery_completed", @{@"sent":@(sent), @"reason":reason});
     void (^callback)(BOOL, NSString *) = self.completion;
     self.completion = nil;
     if (callback) callback(sent, reason);
@@ -54,6 +56,7 @@ static NSString *Normalize(NSString *text) {
 - (void)cancel { self.cancelled = YES; [self finish:NO reason:@"已停止回傳"]; }
 - (void)deliver:(NSString *)text completion:(void (^)(BOOL, NSString *))completion {
     self.completion = completion;
+    RelayLog(@"delivery_started", @{@"result_characters":@(text.length)});
     if (self.cancelled || !text.length || ![self.target isValid]) {
         [self finish:NO reason:@"無法確認 ChatGPT 輸入框"]; return;
     }
@@ -73,6 +76,7 @@ static NSString *Normalize(NSString *text) {
     }
     NSString *current = [self.target readText];
     BOOL matches = current && [Normalize(current) isEqualToString:Normalize(text)];
+    RelayLog(@"delivery_readback", @{@"attempt":@(attempt), @"readable":@(current != nil), @"characters":@(current.length), @"matches_result":@(matches)});
     if (!current || (current.length && !matches)) {
         [self finish:NO reason:@"輸入內容已變更，已暫停回傳"]; return;
     }
@@ -91,7 +95,12 @@ static NSString *Normalize(NSString *text) {
 static id Attr(AXUIElementRef element, CFStringRef attribute) {
     if (!element) return nil;
     CFTypeRef value = NULL;
-    if (AXUIElementCopyAttributeValue(element, attribute, &value) != kAXErrorSuccess) return nil;
+    AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
+    if (error != kAXErrorSuccess) {
+        if (CFEqual(attribute, kAXFocusedWindowAttribute) || CFEqual(attribute, kAXValueAttribute))
+            RelayLog(@"ax_read_failed", @{@"attribute":(__bridge NSString *)attribute, @"ax_error":@(error)});
+        return nil;
+    }
     return CFBridgingRelease(value);
 }
 static BOOL Settable(AXUIElementRef element, CFStringRef attribute) {
@@ -129,32 +138,53 @@ static NSArray *Descendants(AXUIElementRef root) {
     _appElement = CFBridgingRelease(AXUIElementCreateApplication(pid));
     AXUIElementSetMessagingTimeout((__bridge AXUIElementRef)_appElement, 0.5);
     _window = Attr((__bridge AXUIElementRef)_appElement, kAXFocusedWindowAttribute);
-    if (!_window) return self;
+    if (!_window) { RelayLog(@"target_window_missing", @{@"target_pid":@(pid), @"trusted":@(AXIsProcessTrusted())}); return self; }
     _windowTitle = Attr((__bridge AXUIElementRef)_window, kAXTitleAttribute) ?: @"";
     NSSet *composerNames = [NSSet setWithArray:@[@"Message ChatGPT", @"Ask anything", @"Send a message", @"Message", @"訊息", @"傳送訊息給 ChatGPT", @"向 ChatGPT 傳送訊息", @"詢問任何問題", @"向 ChatGPT 发送消息"]];
+    NSMutableArray *eligible = [NSMutableArray new];
     NSMutableArray *editors = [NSMutableArray new];
     NSMutableArray *identified = [NSMutableArray new];
-    for (id node in Descendants((__bridge AXUIElementRef)_window)) {
+    NSArray *nodes = Descendants((__bridge AXUIElementRef)_window);
+    NSUInteger textAreas = 0, writableAreas = 0;
+    for (id node in nodes) {
         AXUIElementRef e = (__bridge AXUIElementRef)node;
-        if (![Attr(e, kAXRoleAttribute) isEqual:(__bridge id)kAXTextAreaRole] || !Settable(e, kAXValueAttribute)) continue;
+        if (![Attr(e, kAXRoleAttribute) isEqual:(__bridge id)kAXTextAreaRole]) continue;
+        textAreas++;
+        if (!Settable(e, kAXValueAttribute)) continue;
+        writableAreas++;
         if ([Attr(e, kAXEnabledAttribute) isEqual:@NO]) continue;
         if (![Attr(e, kAXValueAttribute) isKindOfClass:NSString.class]) continue;
+        [eligible addObject:node];
         NSString *name = Attr(e, kAXDescriptionAttribute) ?: @"";
         NSString *placeholder = Attr(e, CFSTR("AXPlaceholderValue")) ?: @"";
         if ([composerNames containsObject:name] || [composerNames containsObject:placeholder]) [editors addObject:node];
         NSString *identifier = Attr(e, kAXIdentifierAttribute);
         if ([identifier isEqualToString:@"prompt-textarea"]) [identified addObject:node];
     }
-    // Never guess between multiple editable areas (for example an embedded terminal).
-    if (identified.count == 1) _editor = identified.firstObject;
-    else if (editors.count == 1) _editor = editors.firstObject;
+    // ChatGPT's composer name/identifier varies by app build and language.
+    // A sole eligible text area is unambiguous even when those labels are unfamiliar.
+    NSString *selection = @"none";
+    if (identified.count == 1) { _editor = identified.firstObject; selection = @"identifier"; }
+    else if (identified.count == 0 && editors.count == 1) { _editor = editors.firstObject; selection = @"name"; }
+    else if (identified.count == 0 && editors.count == 0 && eligible.count == 1) {
+        _editor = eligible.firstObject; selection = @"unique_writable_text_area";
+    }
+    RelayLog(@"editor_discovery", @{@"target_pid":@(pid), @"nodes":@(nodes.count), @"text_areas":@(textAreas), @"writable_text_areas":@(writableAreas), @"matching_names":@(editors.count), @"matching_identifiers":@(identified.count), @"selected":@(_editor != nil), @"selection":selection, @"eligible":@(eligible.count)});
     return self;
 }
 - (BOOL)isValid {
-    if (!self.editor || !self.window || NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != self.pid) return NO;
+    pid_t front = NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+    if (!self.editor || !self.window || front != self.pid) {
+        RelayLog(@"target_invalid", @{@"has_editor":@(self.editor != nil), @"has_window":@(self.window != nil), @"target_pid":@(self.pid), @"frontmost_pid":@(front)});
+        return NO;
+    }
     id currentWindow = Attr((__bridge AXUIElementRef)self.appElement, kAXFocusedWindowAttribute);
-    if (!currentWindow || !CFEqual((__bridge CFTypeRef)self.window, (__bridge CFTypeRef)currentWindow)) return NO;
-    if (![self.windowTitle isEqual:Attr((__bridge AXUIElementRef)self.window, kAXTitleAttribute) ?: @""]) return NO;
+    if (!currentWindow || !CFEqual((__bridge CFTypeRef)self.window, (__bridge CFTypeRef)currentWindow)) {
+        RelayLog(@"target_invalid", @{@"reason":@"focused_window_changed"}); return NO;
+    }
+    if (![self.windowTitle isEqual:Attr((__bridge AXUIElementRef)self.window, kAXTitleAttribute) ?: @""]) {
+        RelayLog(@"target_invalid", @{@"reason":@"window_title_changed"}); return NO;
+    }
     id parent = self.editor;
     for (int i = 0; parent && i < 40; i++) {
         if (CFEqual((__bridge CFTypeRef)parent, (__bridge CFTypeRef)self.window)) return YES;
@@ -170,8 +200,9 @@ static NSArray *Descendants(AXUIElementRef root) {
     if (![self isValid] || [self readText].length) return NO;
     self.expectedText = text;
     // Directly address the editor: no shared clipboard and no global keystrokes.
-    return AXUIElementSetAttributeValue((__bridge AXUIElementRef)self.editor,
-        kAXValueAttribute, (__bridge CFTypeRef)text) == kAXErrorSuccess;
+    AXError error = AXUIElementSetAttributeValue((__bridge AXUIElementRef)self.editor, kAXValueAttribute, (__bridge CFTypeRef)text);
+    RelayLog(@"editor_write", @{@"ax_error":@(error), @"characters":@(text.length)});
+    return error == kAXErrorSuccess;
 }
 - (BOOL)canSend {
     if (![self isValid]) return NO;
@@ -190,10 +221,13 @@ static NSArray *Descendants(AXUIElementRef root) {
         }
     }
     self.sendButton = matches.count == 1 ? matches.firstObject : nil;
+    RelayLog(@"send_button_discovery", @{@"matches":@(matches.count), @"selected":@(self.sendButton != nil)});
     return self.sendButton != nil;
 }
 - (BOOL)sendText:(NSString *)text {
     if (![self isValid] || !self.sendButton || ![Normalize([self readText]) isEqualToString:Normalize(text)]) return NO;
-    return AXUIElementPerformAction((__bridge AXUIElementRef)self.sendButton, kAXPressAction) == kAXErrorSuccess;
+    AXError error = AXUIElementPerformAction((__bridge AXUIElementRef)self.sendButton, kAXPressAction);
+    RelayLog(@"send_button_invoked", @{@"ax_error":@(error)});
+    return error == kAXErrorSuccess;
 }
 @end
