@@ -9,7 +9,7 @@ APP="$DIST/ChatGPT Terminal Relay.app"
 rm -rf "$BUILD" "$DIST"
 mkdir -p "$BUILD" "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-clang -fobjc-arc -fblocks "$ROOT/src/Relay.m" \
+clang -arch arm64 -fobjc-arc -fblocks -mmacosx-version-min=13.0 "$ROOT/src/Relay.m" "$ROOT/src/RelayDelivery.m" \
   -o "$BUILD/ChatGPTTerminalRelay" \
   -framework Cocoa \
   -framework ApplicationServices
@@ -28,8 +28,8 @@ plutil -create xml1 "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.coyoter.chatgpt-terminal-relay" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string ChatGPTTerminalRelay" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "$PLIST"
-/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 0.4.1" "$PLIST"
-/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 0.4.1" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 0.5.0" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 0.5.0" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Relay.icns" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "$PLIST"
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 13.0" "$PLIST"
@@ -38,7 +38,7 @@ codesign --force --deep --sign - "$APP"
 
 ditto -c -k --sequesterRsrc --keepParent \
   "$APP" \
-  "$DIST/ChatGPT-Terminal-Relay-v0.4.1-macOS.zip"
+  "$DIST/ChatGPT-Terminal-Relay-v0.5.0-macOS.zip"
 
 echo "BUILD_OK"
-echo "$DIST/ChatGPT-Terminal-Relay-v0.4.1-macOS.zip"
+echo "$DIST/ChatGPT-Terminal-Relay-v0.5.0-macOS.zip"

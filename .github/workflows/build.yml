@@ -1,0 +1,67 @@
+name: Build and test
+on:
+  push:
+    branches: [main, stability-windows-v0.5.0]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regression tests
+        run: ./tests/run-macos.sh
+      - name: Build Apple Silicon package
+        run: ./build.sh
+      - name: Verify signature and deployment target
+        run: |
+          codesign --verify --deep --strict 'dist/ChatGPT Terminal Relay.app'
+          xcrun vtool -show-build build/ChatGPTTerminalRelay
+          xcrun vtool -show-build build/ChatGPTTerminalRelay | grep 'minos 13.0'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macOS
+          path: dist/*.zip
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build
+        run: dotnet build windows/ChatGPTTerminalRelay.csproj -c Release --nologo -warnaserror
+      - name: PowerShell and delivery regression tests
+        run: dotnet windows/bin/Release/net10.0-windows/ChatGPTTerminalRelay.dll --self-test
+      - name: Isolated UI Automation fixture
+        id: fixture
+        continue-on-error: true
+        timeout-minutes: 2
+        run: dotnet windows/bin/Release/net10.0-windows/ChatGPTTerminalRelay.dll --ui-fixture
+      - name: Record UI fixture outcome
+        shell: pwsh
+        run: |
+          "Windows UI fixture: ${{ steps.fixture.outcome }}" | Out-File ui-fixture-result.txt
+          "This fixture is not an end-to-end test against the ChatGPT application." | Out-File ui-fixture-result.txt -Append
+      - name: Build x64 package
+        run: ./build-windows.ps1 -Runtime win-x64
+      - name: Build ARM64 package
+        run: ./build-windows.ps1 -Runtime win-arm64
+      - name: Test packaged x64 executable
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath './dist/windows-x64/ChatGPTTerminalRelay.exe' -ArgumentList '--self-test' -PassThru -Wait -RedirectStandardOutput package-test.txt -RedirectStandardError package-test-error.txt
+          Get-Content package-test.txt
+          Get-Content package-test-error.txt
+          if ($process.ExitCode -ne 0) { throw "Packaged EXE failed: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Windows
+          path: |
+            dist/*.zip
+            ui-fixture-result.txt
+            package-test*.txt

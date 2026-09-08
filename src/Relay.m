@@ -1,17 +1,11 @@
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import "RelayDelivery.h"
 
-static NSString * const kRunMarker = @"# CHATGPT_RUN";
-static NSString * const kCurrentVersion = @"0.4.1";
+static NSString * const kCurrentVersion = @"0.5.0";
 static NSString * const kChatGPTBundleID = @"com.openai.codex";
 static NSString * const kLatestReleaseAPI = @"https:" @"//api.github.com/repos/Coyoter/ChatGPT-Terminal-Relay/releases/latest";
 static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-Terminal-Relay/releases";
-
-// Safe timing for ChatGPT web/app UI.
-// Give the source app time to regain focus before paste,
-// then give the composer time to accept the pasted result before Enter.
-static const double kActivationDelaySeconds = 1.00;
-static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 
 @interface RelayAppDelegate : NSObject <NSApplicationDelegate>
 @property NSStatusItem *statusItem;
@@ -24,6 +18,11 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 @property BOOL executing;
 @property NSString *lastExecutedCommand;
 @property NSTimeInterval lastExecutedAt;
+@property NSString *lastResult;
+@property NSString *lastLogPath;
+@property RelayDelivery *delivery;
+@property NSMenuItem *retryMenuItem;
+@property NSMenuItem *resultCopyMenuItem;
 @end
 
 @implementation RelayAppDelegate
@@ -33,6 +32,9 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
     self.executing = NO;
     self.lastChangeCount = NSPasteboard.generalPasteboard.changeCount;
 
+    NSString *saved = [NSString stringWithContentsOfFile:RelaySavedResultPath()
+                                               encoding:NSUTF8StringEncoding error:nil];
+    self.lastResult = saved;
     [self setupStatusItem];
     [self requestAccessibilityPermission];
     [self startClipboardTimer];
@@ -86,6 +88,14 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 
     [menu addItem:NSMenuItem.separatorItem];
 
+    self.retryMenuItem = [[NSMenuItem alloc] initWithTitle:@"重試回傳上次結果" action:@selector(retryReturn:) keyEquivalent:@""];
+    self.retryMenuItem.target = self;
+    [menu addItem:self.retryMenuItem];
+    self.resultCopyMenuItem = [[NSMenuItem alloc] initWithTitle:@"複製上次結果" action:@selector(copyResult:) keyEquivalent:@""];
+    self.resultCopyMenuItem.target = self;
+    [menu addItem:self.resultCopyMenuItem];
+    [menu addItem:NSMenuItem.separatorItem];
+
     NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"結束 Relay"
                                                      action:@selector(quit:)
                                               keyEquivalent:@"q"];
@@ -132,18 +142,8 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 
     NSString *text = [pasteboard stringForType:NSPasteboardTypeString];
 
-    if (!text || ![text hasPrefix:kRunMarker]) {
-        return;
-    }
-
-    NSString *command = [text substringFromIndex:kRunMarker.length];
-
-    command = [command stringByTrimmingCharactersInSet:
-               NSCharacterSet.whitespaceAndNewlineCharacterSet];
-
-    if (command.length == 0) {
-        return;
-    }
+    NSString *command = RelayParseCommand(text);
+    if (!command) return;
 
     // Prevent accidental double-clicks from executing the exact same command twice.
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
@@ -171,7 +171,7 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 
 - (NSDictionary *)runShellCommand:(NSString *)command {
     NSString *tempPath =
-        [NSTemporaryDirectory()
+        [RelayLogDirectory()
          stringByAppendingPathComponent:
          [NSString stringWithFormat:@"chatgpt-relay-%@.log",
           NSUUID.UUID.UUIDString]];
@@ -238,16 +238,22 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
     [handle synchronizeFile];
     [handle closeFile];
 
-    NSData *data =
-        [NSData dataWithContentsOfFile:tempPath];
-
-    [[NSFileManager defaultManager]
-        removeItemAtPath:tempPath
-                   error:nil];
+    NSFileHandle *reader = [NSFileHandle fileHandleForReadingAtPath:tempPath];
+    NSData *data = [reader readDataOfLength:65536];
+    BOOL truncated = [reader readDataOfLength:1].length != 0;
+    [reader closeFile];
 
     NSString *output =
         [[NSString alloc] initWithData:data
                               encoding:NSUTF8StringEncoding];
+
+    if (!output && truncated) {
+        // The preview boundary may split a UTF-8 code point. Keep the valid prefix.
+        for (NSUInteger trim = 1; trim <= 3 && trim < data.length; trim++) {
+            output = [[NSString alloc] initWithBytes:data.bytes length:data.length - trim encoding:NSUTF8StringEncoding];
+            if (output) break;
+        }
+    }
 
     if (!output && data) {
         output =
@@ -260,10 +266,8 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
         output = @"";
     }
 
-    return @{
-        @"exitCode": @(task.terminationStatus),
-        @"output": output
-    };
+    if (truncated) output = [output stringByAppendingFormat:@"\n\n[輸出較長，完整紀錄保留於：%@]", tempPath];
+    return @{@"exitCode": @(task.terminationStatus), @"output": output, @"logPath": tempPath};
 }
 
 - (void)finishCommand:(NSString *)command
@@ -283,55 +287,51 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
          exitCode,
          output];
 
-    NSPasteboard *pasteboard =
-        NSPasteboard.generalPasteboard;
+    self.lastResult = relayResult;
+    self.lastLogPath = result[@"logPath"];
+    [relayResult writeToFile:RelaySavedResultPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [self beginReturn];
+}
 
-    [pasteboard clearContents];
-    [pasteboard setString:relayResult
-                  forType:NSPasteboardTypeString];
+- (void)copyResult:(id)sender {
+    if (!self.lastResult) return;
+    NSPasteboard *p = NSPasteboard.generalPasteboard;
+    [p clearContents];
+    [p setString:self.lastResult forType:NSPasteboardTypeString];
+    self.lastChangeCount = p.changeCount;
+    [self updateStatus:self.monitoring ? @"結果已複製，監聽中" : @"結果已複製，已停止"];
+}
 
-    self.lastChangeCount = pasteboard.changeCount;
+- (void)retryReturn:(id)sender {
+    if (self.executing || !self.lastResult || !self.monitoring) return;
+    self.executing = YES;
+    [self beginReturn];
+}
 
-    [self updateStatus:
-        exitCode.intValue == 0
-            ? @"回傳中"
-            : @"指令失敗，回傳中"];
+- (void)endReturn:(NSString *)status {
+    self.executing = NO;
+    self.delivery = nil;
+    [self updateStatus:self.monitoring ? status : @"已停止，結果已保留"];
+}
 
-    if (!AXIsProcessTrusted()) {
-        self.executing = NO;
-        [self updateStatus:@"需要輔助使用權限"];
-        return;
-    }
-
+- (void)beginReturn {
+    if (!self.monitoring) { [self endReturn:@"已停止，結果已保留"]; return; }
+    if (!AXIsProcessTrusted()) { [self endReturn:@"需要輔助使用權限，結果已保留"]; return; }
     [self updateStatus:@"正在尋找 ChatGPT"];
-
-    [self findOrLaunchChatGPTWithAttempt:0
-                             completion:^(NSRunningApplication *chatGPTApp) {
-        if (!chatGPTApp) {
-            self.executing = NO;
-            [self updateStatus:@"ChatGPT 未開啟，結果已複製"];
-            return;
+    [self findOrLaunchChatGPTWithAttempt:0 completion:^(NSRunningApplication *app) {
+        if (!self.monitoring || !app) { [self endReturn:@"找不到 ChatGPT，結果已保留"]; return; }
+        if (![app activateWithOptions:NSApplicationActivateAllWindows]) {
+            [self endReturn:@"無法喚醒 ChatGPT，請開啟後重試"]; return;
         }
-
-        [self updateStatus:@"正在喚醒 ChatGPT"];
-
-        [chatGPTApp activateWithOptions:
-            NSApplicationActivateAllWindows];
-
-        dispatch_after(
-            dispatch_time(
-                DISPATCH_TIME_NOW,
-                (int64_t)(kActivationDelaySeconds * NSEC_PER_SEC)
-            ),
-            dispatch_get_main_queue(),
-            ^{
-                [self updateStatus:@"回傳中"];
-                [self pasteAndSend];
-
-                self.executing = NO;
-                [self updateStatus:@"監聽中"];
-            }
-        );
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!self.monitoring) { [self endReturn:@"已停止"]; return; }
+            id<RelayTarget> target = [[RelayAXTarget alloc] initWithPID:app.processIdentifier];
+            self.delivery = [[RelayDelivery alloc] initWithTarget:target];
+            [self updateStatus:@"確認輸入框並回傳"];
+            [self.delivery deliver:self.lastResult completion:^(BOOL sent, NSString *reason) {
+                [self endReturn:sent ? @"已交付傳送，監聽中" : [reason stringByAppendingString:@"，結果已保留"]];
+            }];
+        });
     }];
 }
 
@@ -517,45 +517,6 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
     );
 }
 
-- (void)pasteAndSend {
-    CGEventSourceRef source =
-        CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-
-    if (!source) {
-        return;
-    }
-
-    CGEventRef vDown =
-        CGEventCreateKeyboardEvent(source, 9, true);
-
-    CGEventRef vUp =
-        CGEventCreateKeyboardEvent(source, 9, false);
-
-    CGEventSetFlags(vDown, kCGEventFlagMaskCommand);
-    CGEventSetFlags(vUp, kCGEventFlagMaskCommand);
-
-    CGEventPost(kCGHIDEventTap, vDown);
-    CGEventPost(kCGHIDEventTap, vUp);
-
-    CFRelease(vDown);
-    CFRelease(vUp);
-
-    usleep(kPasteToSendDelayMicroseconds);
-
-    CGEventRef enterDown =
-        CGEventCreateKeyboardEvent(source, 36, true);
-
-    CGEventRef enterUp =
-        CGEventCreateKeyboardEvent(source, 36, false);
-
-    CGEventPost(kCGHIDEventTap, enterDown);
-    CGEventPost(kCGHIDEventTap, enterUp);
-
-    CFRelease(enterDown);
-    CFRelease(enterUp);
-    CFRelease(source);
-}
-
 - (void)checkForUpdatesMenu:(id)sender {
     [self checkForUpdates:YES];
 }
@@ -605,8 +566,12 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
                                             options:0
                                               error:&jsonError];
 
+        if (![json isKindOfClass:NSDictionary.class]) {
+            if (manual) dispatch_async(dispatch_get_main_queue(), ^{ [self showUpdateError:@"更新資料格式不正確。"]; });
+            return;
+        }
         NSString *tag = json[@"tag_name"];
-        NSString *releaseURL = json[@"html_url"];
+        NSString *releaseURL = [json[@"html_url"] isKindOfClass:NSString.class] ? json[@"html_url"] : kReleasesURL;
 
         if (jsonError || ![tag isKindOfClass:NSString.class]) {
             if (manual) {
@@ -690,6 +655,8 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 
     self.startMenuItem.enabled = !self.monitoring;
     self.stopMenuItem.enabled = self.monitoring;
+    self.retryMenuItem.enabled = self.monitoring && !self.executing && self.lastResult.length > 0;
+    self.resultCopyMenuItem.enabled = !self.executing && self.lastResult.length > 0;
 }
 
 - (void)startMonitoring:(id)sender {
@@ -703,6 +670,7 @@ static const useconds_t kPasteToSendDelayMicroseconds = 900000;
 
 - (void)stopMonitoring:(id)sender {
     self.monitoring = NO;
+    [self.delivery cancel];
     [self updateStatus:@"已停止"];
 }
 

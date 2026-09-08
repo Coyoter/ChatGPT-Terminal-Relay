@@ -3,3 +3,6 @@ build/
 dist/
 *.app
 *.zip
+windows/bin/
+windows/obj/
+backups/
