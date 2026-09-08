@@ -6,6 +6,9 @@
 @property NSString *text;
 @property NSInteger changes;
 @property NSUInteger copies;
+@property BOOL axNoOp;
+@property BOOL mouseNoOp;
+@property NSUInteger clicks;
 @end
 @implementation AutoFixture
 - (instancetype)init {
@@ -17,12 +20,17 @@
     return self;
 }
 - (RelayAutoSnapshot *)snapshot { return self.current; }
-- (BOOL)copyResponse:(id)button windowTitle:(NSString *)title { self.copies++; self.changes++; return YES; }
+- (BOOL)copyResponse:(id)button windowTitle:(NSString *)title { self.copies++; if (!self.axNoOp) self.changes++; return YES; }
+- (BOOL)clickResponse:(id)button windowTitle:(NSString *)title stillActive:(BOOL (^)(void))active {
+    if (!active()) return NO;
+    self.clicks++; if (!self.mouseNoOp) self.changes++; return YES;
+}
 - (NSInteger)clipboardChangeCount { return self.changes; }
 - (NSString *)clipboardText { return self.text; }
 @end
 @interface RelayAutoPilot (StressHarness)
 - (void)acceptSnapshot:(RelayAutoSnapshot *)snapshot generation:(NSUInteger)generation;
+- (void)awaitClipboard:(NSInteger)before attempt:(NSUInteger)attempt generation:(NSUInteger)generation;
 @end
 static int passed;
 static void Check(BOOL condition, const char *name) {
@@ -70,6 +78,28 @@ int main(void) {
         [pilot startWithCommand:^(NSString *command) { commands++; } status:^(NSString *status) {}]; Pump();
         source.text = @"Task is complete."; source.current.responseCopyButton = @"completion"; Tick(pilot, 4);
         Check(!pilot.enabled && commands == 2, "no-command final answer ends the loop");
+
+        source = [AutoFixture new]; source.axNoOp = YES;
+        pilot = [[RelayAutoPilot alloc] initWithSource:source];
+        __block int fallbackCommands = 0;
+        [pilot startWithCommand:^(NSString *command) { fallbackCommands++; } status:^(NSString *status) {}]; Pump();
+        source.current.responseCopyButton = @"ax-noop-response"; Tick(pilot, 4);
+        Check(source.copies == 1 && fallbackCommands == 0, "AX success without clipboard update is not counted as a copy");
+        [pilot awaitClipboard:0 attempt:20 generation:[[pilot valueForKey:@"generation"] unsignedIntegerValue]];
+        Pump();
+        Check(source.clicks == 1 && fallbackCommands == 1, "no-op AX action falls back to a verified mouse click");
+        Tick(pilot, 3);
+        Check(source.clicks == 1 && fallbackCommands == 1, "mouse fallback dispatches once despite old polling callbacks");
+        [pilot stop];
+
+        source = [AutoFixture new]; source.axNoOp = YES; source.mouseNoOp = YES;
+        pilot = [[RelayAutoPilot alloc] initWithSource:source];
+        [pilot startWithCommand:^(NSString *command) { fallbackCommands++; } status:^(NSString *status) {}]; Pump();
+        source.current.responseCopyButton = @"both-noop"; Tick(pilot, 4);
+        NSUInteger noopGeneration = [[pilot valueForKey:@"generation"] unsignedIntegerValue];
+        [pilot awaitClipboard:0 attempt:20 generation:noopGeneration]; Pump();
+        [pilot awaitClipboard:0 attempt:20 generation:noopGeneration]; Pump();
+        Check(!pilot.enabled && fallbackCommands == 1 && source.clicks == 1, "failed physical copy stops without executing or clicking repeatedly");
 
         NSString *state = [[NSString stringWithUTF8String:getenv("RELAY_TEST_DATA_DIR")] stringByAppendingPathComponent:@"auth-test.json"];
         __block int resets = 0;

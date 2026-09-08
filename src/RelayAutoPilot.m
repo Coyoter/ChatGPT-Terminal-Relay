@@ -36,6 +36,8 @@ NSString *RelayCommandFromResponse(NSString *text) {
 @property NSString *lastStatus;
 @property NSString *lastResponseText;
 @property id lastDispatchedCopy;
+@property BOOL mouseFallbackUsed;
+@property BOOL preferMouse;
 @property(copy) void (^commandHandler)(NSString *);
 @property(copy) void (^statusHandler)(NSString *);
 @end
@@ -101,8 +103,10 @@ NSString *RelayCommandFromResponse(NSString *text) {
     self.previousCopy = snapshot.responseCopyButton;
     self.sawGenerating = NO; self.stableCount = 0;
     self.copying = YES;
+    self.mouseFallbackUsed = NO;
     NSInteger before = [self.source clipboardChangeCount];
     [self status:@"全自動：複製 ChatGPT 的完整回答"];
+    if (self.preferMouse) { [self tryMouseCopy:before generation:generation]; return; }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         if (!self.enabled || generation != self.generation) return;
         BOOL copied = NO;
@@ -110,14 +114,36 @@ NSString *RelayCommandFromResponse(NSString *text) {
         @catch (NSException *exception) { RelayLog(@"auto_copy_exception", @{@"name":exception.name}); }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!self.enabled || generation != self.generation) return;
-            if (!copied) { self.copying = NO; [self status:@"無法複製回答，全自動已停止"]; [self stop]; return; }
+            if (!copied) { [self tryMouseCopy:before generation:generation]; return; }
+            [self awaitClipboard:before attempt:0 generation:generation];
+        });
+    });
+}
+- (void)tryMouseCopy:(NSInteger)before generation:(NSUInteger)generation {
+    if (!self.enabled || generation != self.generation) return;
+    if (self.mouseFallbackUsed || ![self.source respondsToSelector:@selector(clickResponse:windowTitle:stillActive:)]) {
+        self.copying = NO; [self status:@"複製未完成，全自動已停止"]; [self stop]; return;
+    }
+    self.mouseFallbackUsed = YES;
+    RelayLog(@"auto_copy_mouse_fallback", @{@"previous_mouse_copy_verified":@(self.preferMouse)});
+    [self status:@"全自動：驗證並點擊複製按鈕"];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL (^active)(void) = ^BOOL { return self.enabled && generation == self.generation; };
+        BOOL clicked = NO;
+        @try { if (active()) clicked = [self.source clickResponse:self.stableCopy windowTitle:self.boundTitle stillActive:active]; }
+        @catch (NSException *exception) { RelayLog(@"auto_mouse_copy_exception", @{@"name":exception.name}); }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!active()) return;
+            RelayLog(@"auto_mouse_copy_result", @{@"clicked":@(clicked)});
+            if (!clicked) { self.copying = NO; [self status:@"找不到可安全點擊的複製按鈕，全自動已停止"]; [self stop]; return; }
             [self awaitClipboard:before attempt:0 generation:generation];
         });
     });
 }
 - (void)awaitClipboard:(NSInteger)before attempt:(NSUInteger)attempt generation:(NSUInteger)generation {
-    if (!self.enabled || generation != self.generation) return;
+    if (!self.enabled || !self.copying || generation != self.generation) return;
     if ([self.source clipboardChangeCount] != before) {
+        if (self.mouseFallbackUsed) self.preferMouse = YES;
         NSString *response = [self.source clipboardText];
         NSString *command = RelayCommandFromResponse(response);
         self.copying = NO;
@@ -132,7 +158,10 @@ NSString *RelayCommandFromResponse(NSString *text) {
         if (self.commandHandler) self.commandHandler(command);
         return;
     }
-    if (attempt >= 20) { self.copying = NO; [self status:@"複製未完成，全自動已停止"]; [self stop]; return; }
+    if (attempt >= 20) {
+        if (!self.mouseFallbackUsed) { [self tryMouseCopy:before generation:generation]; return; }
+        self.copying = NO; [self status:@"實際點擊後剪貼簿仍未更新，全自動已停止"]; [self stop]; return;
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self awaitClipboard:before attempt:attempt + 1 generation:generation];
     });
@@ -212,6 +241,81 @@ static BOOL Matches(NSString *value, NSArray<NSString *> *labels) {
     AXError error = AXUIElementPerformAction((__bridge AXUIElementRef)button, kAXPressAction);
     RelayLog(@"auto_copy_pressed", @{@"ax_error":@(error)});
     return error == kAXErrorSuccess;
+}
+- (BOOL)clickResponse:(id)button windowTitle:(NSString *)title stillActive:(BOOL (^)(void))active {
+    RelayAutoSnapshot *current = [self snapshot];
+    if (!active() || !current.available || current.generating || !current.idle ||
+        ![current.responseCopyButton isEqual:button] || ![current.windowTitle isEqualToString:title]) return NO;
+    id position = AutoAttr(button, kAXPositionAttribute), size = AutoAttr(button, kAXSizeAttribute);
+    CGPoint origin; CGSize extent;
+    if (!position || !size || CFGetTypeID((__bridge CFTypeRef)position) != AXValueGetTypeID() ||
+        CFGetTypeID((__bridge CFTypeRef)size) != AXValueGetTypeID() ||
+        !AXValueGetValue((__bridge AXValueRef)position, kAXValueCGPointType, &origin) ||
+        !AXValueGetValue((__bridge AXValueRef)size, kAXValueCGSizeType, &extent) || extent.width <= 0 || extent.height <= 0) {
+        RelayLog(@"auto_mouse_copy_rejected", @{@"reason":@"missing_button_geometry"}); return NO;
+    }
+    CGPoint point = CGPointMake(origin.x + extent.width / 2, origin.y + extent.height / 2);
+    if (!isfinite(point.x) || !isfinite(point.y)) return NO;
+    AXUIElementRef system = AXUIElementCreateSystemWide();
+    AXUIElementRef hit = NULL;
+    AXError hitError = AXUIElementCopyElementAtPosition(system, point.x, point.y, &hit);
+    pid_t hitPID = 0;
+    if (hit) AXUIElementGetPid(hit, &hitPID);
+    if (hit) CFRelease(hit);
+    if (hitError != kAXErrorSuccess || hitPID != self.app.processIdentifier ||
+        CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft) || !active()) {
+        CFRelease(system);
+        RelayLog(@"auto_mouse_copy_rejected", @{@"reason":@"button_not_in_target_app_or_mouse_in_use", @"hit_pid":@(hitPID)}); return NO;
+    }
+    CGEventRef probe = CGEventCreate(NULL);
+    if (!probe) { CFRelease(system); return NO; }
+    CGPoint oldPoint = CGEventGetLocation(probe); CFRelease(probe);
+    CGEventRef move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, point, kCGMouseButtonLeft);
+    if (!move) { CFRelease(system); return NO; }
+    CGEventPost(kCGHIDEventTap, move); CFRelease(move);
+    usleep(120000); // Let hover-only copy controls become hit-testable.
+    hit = NULL;
+    hitError = AXUIElementCopyElementAtPosition(system, point.x, point.y, &hit);
+    CFRelease(system);
+    BOOL exactButton = NO;
+    id ancestor = hit ? CFBridgingRelease(hit) : nil;
+    for (int depth = 0; ancestor && depth < 10; depth++) {
+        if ([ancestor isEqual:button]) { exactButton = YES; break; }
+        ancestor = AutoAttr(ancestor, kAXParentAttribute);
+    }
+    BOOL clicked = NO;
+    probe = CGEventCreate(NULL);
+    CGPoint cursor = probe ? CGEventGetLocation(probe) : CGPointMake(INFINITY, INFINITY);
+    if (probe) CFRelease(probe);
+    BOOL cursorUnmoved = fabs(cursor.x - point.x) < 2 && fabs(cursor.y - point.y) < 2 &&
+        !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft);
+    if (cursorUnmoved && hitError == kAXErrorSuccess && exactButton && active() && !self.app.terminated &&
+        NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == self.app.processIdentifier &&
+        [AutoAttr(self.axApp, kAXFocusedWindowAttribute) isEqual:self.window] &&
+        [AutoAttr(self.window, kAXTitleAttribute) isEqualToString:title]) {
+        CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, point, kCGMouseButtonLeft);
+        CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
+        if (down && up) {
+            CGEventSetFlags(down, 0); CGEventSetFlags(up, 0);
+            CGEventSetIntegerValueField(down, kCGMouseEventClickState, 1);
+            CGEventSetIntegerValueField(up, kCGMouseEventClickState, 1);
+            CGEventPost(kCGHIDEventTap, down); CGEventPost(kCGHIDEventTap, up); clicked = YES;
+        }
+        if (down) CFRelease(down); if (up) CFRelease(up);
+    }
+    // Preserve the user's cursor if they did not move it during this brief operation.
+    usleep(80000);
+    probe = CGEventCreate(NULL);
+    if (probe) {
+        CGPoint now = CGEventGetLocation(probe); CFRelease(probe);
+        if (fabs(now.x - point.x) < 2 && fabs(now.y - point.y) < 2 &&
+            NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == self.app.processIdentifier) {
+            move = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, oldPoint, kCGMouseButtonLeft);
+            if (move) { CGEventPost(kCGHIDEventTap, move); CFRelease(move); }
+        }
+    }
+    RelayLog(@"auto_mouse_copy_hit_test", @{@"exact_button":@(exactButton), @"clicked":@(clicked)});
+    return clicked;
 }
 - (NSInteger)clipboardChangeCount { return NSPasteboard.generalPasteboard.changeCount; }
 - (NSString *)clipboardText { return [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString]; }

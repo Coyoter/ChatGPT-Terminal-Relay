@@ -5,7 +5,7 @@
 #import "RelayAuthorization.h"
 #import "RelayAutoPilot.h"
 
-static NSString * const kCurrentVersion = @"0.6.0";
+static NSString * const kCurrentVersion = @"0.6.1";
 static NSString * const kChatGPTBundleID = @"com.openai.codex";
 static NSString * const kLatestReleaseAPI = @"https:" @"//api.github.com/repos/Coyoter/ChatGPT-Terminal-Relay/releases/latest";
 static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-Terminal-Relay/releases";
@@ -222,10 +222,10 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
         return;
     }
 
-    [self acceptCommand:command];
+    [self acceptCommand:command origin:@"manual_clipboard"];
 }
 
-- (void)acceptCommand:(NSString *)command {
+- (void)acceptCommand:(NSString *)command origin:(NSString *)origin {
     if (!self.monitoring || self.executing || !command.length) return;
     // Prevent accidental double-clicks from executing the exact same command twice.
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
@@ -242,7 +242,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     self.executing = YES;
     [self.autoPilot suspend];
     self.commandID = NSUUID.UUID.UUIDString;
-    RelayLog(@"command_accepted", @{@"command_id":self.commandID, @"characters":@(command.length), @"accessibility_trusted":@(AXIsProcessTrusted())});
+    RelayLog(@"command_accepted", @{@"origin":origin, @"command_id":self.commandID, @"characters":@(command.length), @"accessibility_trusted":@(AXIsProcessTrusted())});
     [self updateStatus:@"執行中"];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -831,7 +831,7 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     [self.autoPilot startWithCommand:^(NSString *command) {
         RelayAppDelegate *strongSelf = weakSelf;
         strongSelf.lastChangeCount = NSPasteboard.generalPasteboard.changeCount;
-        [strongSelf acceptCommand:command];
+        [strongSelf acceptCommand:command origin:@"automatic_response"];
     } status:^(NSString *status) {
         RelayAppDelegate *strongSelf = weakSelf;
         if (!strongSelf.executing) [strongSelf updateStatus:status];
@@ -851,8 +851,10 @@ static NSString * const kReleasesURL = @"https:" @"//github.com/Coyoter/ChatGPT-
     self.statusMenuItem.title =
         [NSString stringWithFormat:@"狀態：%@", status];
 
-    self.statusItem.button.title =
-        self.executing ? @"⇄ …" : (self.lastAccessibilityTrusted ? @"⇄ Relay" : @"⇄ 權限");
+    BOOL autoNeedsAttention = [status containsString:@"全自動已停止"] || [status containsString:@"全自動已結束"];
+    self.statusItem.button.title = self.executing ? @"⇄ …" :
+        (!self.lastAccessibilityTrusted ? @"⇄ 權限" :
+         (autoNeedsAttention ? @"⇄ 查看" : (self.autoPilot.enabled ? @"⇄ 自動" : @"⇄ Relay")));
 
     self.startMenuItem.enabled = !self.monitoring;
     self.stopMenuItem.enabled = self.monitoring;

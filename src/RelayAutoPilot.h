@@ -15,6 +15,8 @@ NSString *RelayCommandFromResponse(NSString *text);
 - (BOOL)copyResponse:(id)button windowTitle:(NSString *)title;
 - (NSInteger)clipboardChangeCount;
 - (NSString *)clipboardText;
+@optional
+- (BOOL)clickResponse:(id)button windowTitle:(NSString *)title stillActive:(BOOL (^)(void))active;
 @end
 
 @interface RelayAutoPilot : NSObject
